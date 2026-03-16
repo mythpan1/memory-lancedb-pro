@@ -24,6 +24,7 @@ import { TEMPORAL_VERSIONED_CATEGORIES } from "./memory-categories.js";
 import { appendSelfImprovementEntry, ensureSelfImprovementLearningFiles } from "./self-improvement-files.js";
 import { getDisplayCategoryTag } from "./reflection-metadata.js";
 import {
+  filterUserMdExclusiveRecallResults,
   isUserMdExclusiveMemory,
   type WorkspaceBoundaryConfig,
 } from "./workspace-boundary.js";
@@ -94,25 +95,6 @@ function sanitizeMemoryForSerialization(results: RetrievalResult[]) {
     score: r.score,
     sources: r.sources,
   }));
-}
-
-function filterUserMdExclusiveResults(
-  results: RetrievalResult[],
-  workspaceBoundary?: WorkspaceBoundaryConfig,
-): RetrievalResult[] {
-  return results.filter((result) => {
-    const meta = parseSmartMetadata(result.entry.metadata, result.entry);
-    return !isUserMdExclusiveMemory(
-      {
-        memoryCategory: meta.memory_category,
-        factKey: meta.fact_key,
-        text: result.entry.text,
-        abstract: meta.l0_abstract,
-        content: meta.l2_content,
-      },
-      workspaceBoundary,
-    );
-  });
 }
 
 function parseAgentIdFromSessionKey(sessionKey: string | undefined): string | undefined {
@@ -477,7 +459,7 @@ export function registerMemoryRecallTool(
             }
           }
 
-          const results = filterUserMdExclusiveResults(await retrieveWithRetry(runtimeContext.retriever, {
+          const results = filterUserMdExclusiveRecallResults(await retrieveWithRetry(runtimeContext.retriever, {
             query,
             limit: safeLimit,
             scopeFilter,

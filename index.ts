@@ -53,6 +53,7 @@ import {
   toLifecycleMemory,
 } from "./src/smart-metadata.js";
 import {
+  filterUserMdExclusiveRecallResults,
   isUserMdExclusiveMemory,
   type WorkspaceBoundaryConfig,
 } from "./src/workspace-boundary.js";
@@ -221,25 +222,6 @@ function resolveHookAgentId(
   sessionKey: string | undefined,
 ): string {
   return explicitAgentId || parseAgentIdFromSessionKey(sessionKey) || "main";
-}
-
-function filterUserMdExclusiveRecallResults<T extends { entry: { metadata?: string; text: string } }>(
-  results: T[],
-  workspaceBoundary?: WorkspaceBoundaryConfig,
-): T[] {
-  return results.filter((result) => {
-    const meta = parseSmartMetadata(result.entry.metadata, result.entry as any);
-    return !isUserMdExclusiveMemory(
-      {
-        memoryCategory: meta.memory_category,
-        factKey: meta.fact_key,
-        text: result.entry.text,
-        abstract: meta.l0_abstract,
-        content: meta.l2_content,
-      },
-      workspaceBoundary,
-    );
-  });
 }
 
 function summarizeAgentEndMessages(messages: unknown[]): string {
@@ -2278,9 +2260,8 @@ const memoryLanceDBProPlugin = {
 
               if ((stats.boundarySkipped ?? 0) > 0) {
                 api.logger.info(
-                  `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; regex fallback suppressed`,
+                  `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; continuing to regex fallback for non-boundary texts`,
                 );
-                return;
               }
 
               api.logger.info(
