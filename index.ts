@@ -2033,7 +2033,7 @@ const memoryLanceDBProPlugin = {
     );
     api.logger.info(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
-    api.on("message_received", (event, ctx) => {
+    api.on("message_received", (event: any, ctx: any) => {
       const conversationKey = buildAutoCaptureConversationKeyFromIngress(
         ctx.channelId,
         ctx.conversationId,
@@ -2050,7 +2050,7 @@ const memoryLanceDBProPlugin = {
       );
     });
 
-    api.on("before_message_write", (event, ctx) => {
+    api.on("before_message_write", (event: any, ctx: any) => {
       const message = event.message as Record<string, unknown> | undefined;
       const role =
         message && typeof message.role === "string" && message.role.trim().length > 0
@@ -2146,17 +2146,38 @@ const memoryLanceDBProPlugin = {
     // Auto-recall: inject relevant memories before agent starts
     // Default is OFF to prevent the model from accidentally echoing injected context.
     if (config.autoRecall === true) {
+      // Cache the most recent raw user message per session so the
+      // before_prompt_build gating can check the *user* text, not the full
+      // assembled prompt (which includes system instructions and is too long
+      // for the short-message skip heuristic in shouldSkipRetrieval).
+      const lastRawUserMessage = new Map<string, string>();
+      api.on("message_received", (event: any, ctx: any) => {
+        // Both message_received and before_prompt_build have channelId in ctx,
+        // so use it as the shared cache key for raw user message gating.
+        const cacheKey = ctx?.channelId || ctx?.conversationId || "default";
+        const raw = typeof event.content === "string" ? event.content.trim() : "";
+        // Strip leading bot mentions (@BotName or <@id>) so gating sees the
+        // actual user intent, not the mention prefix.
+        const text = raw.replace(/^(?:@\S+\s*|<@!?\d+>\s*)+/, "").trim();
+        if (text) lastRawUserMessage.set(cacheKey, text);
+      });
+
       const AUTO_RECALL_TIMEOUT_MS = 3_000; // bounded timeout to prevent agent startup stall
-      api.on("before_agent_start", async (event, ctx) => {
+      api.on("before_prompt_build", async (event: any, ctx: any) => {
+        // Manually increment turn counter for this session
+        const sessionId = ctx?.sessionId || "default";
+
+        // Use cached raw user message for gating (short-message skip, greeting
+        // detection, etc.).  Fall back to event.prompt if no cached message is
+        // available (e.g. first message or non-channel triggers).
+        const cacheKey = ctx?.channelId || sessionId;
+        const gatingText = lastRawUserMessage.get(cacheKey) || event.prompt || "";
         if (
           !event.prompt ||
-          shouldSkipRetrieval(event.prompt, config.autoRecallMinLength)
+          shouldSkipRetrieval(gatingText, config.autoRecallMinLength)
         ) {
           return;
         }
-
-        // Manually increment turn counter for this session
-        const sessionId = ctx?.sessionId || "default";
         const currentTurn = (turnCounter.get(sessionId) || 0) + 1;
         turnCounter.set(sessionId, currentTurn);
 
@@ -2376,23 +2397,25 @@ const memoryLanceDBProPlugin = {
           };
         };
 
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
           const result = await Promise.race([
-            recallWork(),
-            new Promise<undefined>((resolve) =>
-              setTimeout(() => {
+            recallWork().then((r) => { clearTimeout(timeoutId); return r; }),
+            new Promise<undefined>((resolve) => {
+              timeoutId = setTimeout(() => {
                 api.logger.warn(
                   `memory-lancedb-pro: auto-recall timed out after ${AUTO_RECALL_TIMEOUT_MS}ms; skipping memory injection to avoid stalling agent startup`,
                 );
                 resolve(undefined);
-              }, AUTO_RECALL_TIMEOUT_MS),
-            ),
+              }, AUTO_RECALL_TIMEOUT_MS);
+            }),
           ]);
           return result;
         } catch (err) {
+          clearTimeout(timeoutId);
           api.logger.warn(`memory-lancedb-pro: recall failed: ${String(err)}`);
         }
-      });
+      }, { priority: 10 });
     }
 
     // Auto-capture: analyze and store important information after agent ends
@@ -2636,7 +2659,7 @@ const memoryLanceDBProPlugin = {
               );
             }
 
-            if (existing.length > 0 && existing[0].score > 0.95) {
+            if (existing.length > 0 && existing[0].score > 0.90) {
               continue;
             }
 
@@ -2831,7 +2854,7 @@ const memoryLanceDBProPlugin = {
         return sourceAgentId;
       };
 
-      api.on("after_tool_call", (event, ctx) => {
+      api.on("after_tool_call", (event: any, ctx: any) => {
         const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey : "";
         if (isInternalReflectionSessionKey(sessionKey)) return;
         if (!sessionKey) return;
@@ -2867,7 +2890,7 @@ const memoryLanceDBProPlugin = {
         }
       }, { priority: 15 });
 
-      api.on("before_agent_start", async (_event, ctx) => {
+      api.on("before_prompt_build", async (_event: any, ctx: any) => {
         const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey : "";
         if (isInternalReflectionSessionKey(sessionKey)) return;
         if (reflectionInjectMode !== "inheritance-only" && reflectionInjectMode !== "inheritance+derived") return;
@@ -2894,7 +2917,7 @@ const memoryLanceDBProPlugin = {
         }
       }, { priority: 12 });
 
-      api.on("before_prompt_build", async (_event, ctx) => {
+      api.on("before_prompt_build", async (_event: any, ctx: any) => {
         const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey : "";
         if (isInternalReflectionSessionKey(sessionKey)) return;
         const agentId = resolveHookAgentId(
@@ -2945,7 +2968,7 @@ const memoryLanceDBProPlugin = {
         return { prependContext: blocks.join("\n\n") };
       }, { priority: 15 });
 
-      api.on("session_end", (_event, ctx) => {
+      api.on("session_end", (_event: any, ctx: any) => {
         const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
         if (!sessionKey) return;
         reflectionErrorStateBySession.delete(sessionKey);
@@ -3227,7 +3250,7 @@ const memoryLanceDBProPlugin = {
         name: "memory-lancedb-pro.memory-reflection.command-reset",
         description: "Generate reflection log before /reset",
       });
-      api.logger.info("memory-reflection: integrated hooks registered (command:new, command:reset, after_tool_call, before_agent_start, before_prompt_build)");
+      api.logger.info("memory-reflection: integrated hooks registered (command:new, command:reset, after_tool_call, before_prompt_build, session_end)");
     }
 
     if (config.sessionStrategy === "systemSessionMemory") {
