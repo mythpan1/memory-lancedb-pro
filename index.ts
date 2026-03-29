@@ -3827,10 +3827,10 @@ export function parsePluginConfig(value: unknown): PluginConfig {
         ensureLearningFiles: (cfg.selfImprovement as Record<string, unknown>).ensureLearningFiles !== false,
       }
       : {
-        enabled: false,
-        beforeResetNote: false,
-        skipSubagentBootstrap: false,
-        ensureLearningFiles: false,
+        enabled: true,
+        beforeResetNote: true,
+        skipSubagentBootstrap: true,
+        ensureLearningFiles: true,
       },
     memoryReflection: memoryReflectionRaw
       ? {
