@@ -10,7 +10,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
-import { isNoise } from "./noise-filter.js";
+import { isNoise, ENVELOPE_NOISE_PATTERNS } from "./noise-filter.js";
+import { stripEnvelopeMetadata } from "./smart-extractor.js";
 import { isSystemBypassId, resolveScopeFilter, parseAgentIdFromSessionKey, type MemoryScopeManager } from "./scopes.js";
 import type { Embedder } from "./embedder.js";
 import {
@@ -174,9 +175,15 @@ async function retrieveWithRetry(
     scopeFilter?: string[];
     category?: string;
   },
+  countStore?: () => Promise<number>,
 ): Promise<RetrievalResult[]> {
   let results = await retriever.retrieve(params);
   if (results.length === 0) {
+    // Skip retry if store is empty — nothing to catch up via write-ahead lag.
+    if (countStore) {
+      const total = await countStore();
+      if (total === 0) return results;
+    }
     await sleep(75);
     results = await retriever.retrieve(params);
   }
@@ -209,7 +216,7 @@ async function resolveMemoryId(
     query: trimmed,
     limit: 5,
     scopeFilter,
-  });
+  }, () => context.store.count());
   if (results.length === 0) {
     return {
       ok: false,
@@ -574,7 +581,7 @@ export function registerMemoryRecallTool(
             scopeFilter,
             category,
             source: "manual",
-          }), runtimeContext.workspaceBoundary);
+          }, () => runtimeContext.store.count()), runtimeContext.workspaceBoundary);
 
           if (results.length === 0) {
             return {
@@ -697,6 +704,20 @@ export function registerMemoryStoreTool(
         };
 
         try {
+          // Guard: strip envelope metadata first, reject only if nothing remains (P2 fix)
+          const stripped = stripEnvelopeMetadata(text);
+          if (!stripped.trim()) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Skipped: text is purely envelope metadata with no extractable memory content.",
+                },
+              ],
+              details: { action: "envelope_metadata_rejected", text: text.slice(0, 60) },
+            };
+          }
+
           const agentId = runtimeContext.agentId;
           // Determine target scope
           let targetScope = scope;
@@ -768,12 +789,11 @@ export function registerMemoryStoreTool(
           }
 
           const safeImportance = clamp01(importance, 0.7);
-          const vector = await runtimeContext.embedder.embedPassage(text);
+          const vector = await runtimeContext.embedder.embedPassage(stripped);
 
           // Temporal awareness: classify and infer expiry
-          const temporalType = classifyTemporal(text);
-          const validUntil = inferExpiry(text);
-
+          const temporalType = classifyTemporal(stripped);
+          const validUntil = inferExpiry(stripped);
           // Check for duplicates / supersede candidates using raw vector similarity
           // (bypasses importance/recency weighting).
           // Fail-open by design: dedup must never block a legitimate memory write.
@@ -1065,7 +1085,7 @@ export function registerMemoryForgetTool(
               query,
               limit: 5,
               scopeFilter,
-            });
+            }, () => context.store.count());
 
             if (results.length === 0) {
               return {
@@ -1207,7 +1227,7 @@ export function registerMemoryUpdateTool(
               query: memoryId,
               limit: 3,
               scopeFilter,
-            });
+            }, () => context.store.count());
             if (results.length === 0) {
               return {
                 content: [
@@ -2128,7 +2148,7 @@ export function registerMemoryExplainRankTool(
             limit: safeLimit,
             scopeFilter,
             source: "manual",
-          });
+          }, () => runtimeContext.store.count());
           if (results.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant memories found." }],
